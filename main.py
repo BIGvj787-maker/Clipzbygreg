@@ -8,12 +8,13 @@ from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel
 
+
 app = FastAPI(title="Clipz by Greg")
 
-monitored_creators = set()
-recordings = {}
-recording_sessions = {}
-clips = {}
+
+# -----------------------------
+# FOLDERS
+# -----------------------------
 
 RECORDINGS_DIR = Path("recordings")
 CLIPS_DIR = Path("clips")
@@ -22,11 +23,22 @@ RECORDINGS_DIR.mkdir(exist_ok=True)
 CLIPS_DIR.mkdir(exist_ok=True)
 
 
+# -----------------------------
+# IN-MEMORY DATA
+# -----------------------------
+
+monitored_creators = []
+recordings = []
+recording_sessions = {}
+clips = []
+best_moments = {}
+
+
+# -----------------------------
+# MODELS
+# -----------------------------
+
 class CreatorRequest(BaseModel):
-    username: str
-
-
-class ClipRequest(BaseModel):
     username: str
 
 
@@ -34,348 +46,198 @@ class RecordingRequest(BaseModel):
     username: str
 
 
+class ClipRequest(BaseModel):
+    username: str
+
+
+class BestMomentsRequest(BaseModel):
+    username: str
+
+
+class AIClipRequest(BaseModel):
+    username: str
+    start_time: float
+    duration: float = 30
+
+
+# -----------------------------
+# HELPERS
+# -----------------------------
+
 def now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def get_latest_recording(username):
+    user_recordings = [
+        r for r in recordings
+        if r["username"].lower() == username.lower()
+    ]
+
+    if not user_recordings:
+        return None
+
+    return user_recordings[-1]
+
+
+# -----------------------------
+# HOMEPAGE
+# -----------------------------
+
 @app.get("/", response_class=HTMLResponse)
 def home():
-    creator_count = len(monitored_creators)
-    recording_count = len(recordings)
-    active_count = len(recording_sessions)
-    clip_count = len(clips)
 
-    return f"""
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Clipz by Greg</title>
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Clipz by Greg</title>
 
-<style>
-* {{
-    box-sizing: border-box;
-    margin: 0;
-    padding: 0;
-}}
+        <style>
+            body {
+                margin: 0;
+                font-family: Arial, sans-serif;
+                background: #090511;
+                color: white;
+            }
 
-body {{
-    font-family: Arial, Helvetica, sans-serif;
-    background:
-        radial-gradient(circle at top left, #39206b 0%, transparent 35%),
-        radial-gradient(circle at bottom right, #142b55 0%, transparent 35%),
-        #08080d;
-    color: white;
-    min-height: 100vh;
-}}
+            nav {
+                padding: 22px 8%;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                background: #0d0718;
+                border-bottom: 1px solid #241536;
+            }
 
-.nav {{
-    height: 76px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0 7%;
-    border-bottom: 1px solid rgba(255,255,255,.08);
-    background: rgba(8,8,13,.72);
-    backdrop-filter: blur(14px);
-}}
+            .logo {
+                font-size: 24px;
+                font-weight: bold;
+            }
 
-.logo {{
-    font-size: 24px;
-    font-weight: 800;
-    letter-spacing: -1px;
-}}
+            .hero {
+                padding: 100px 8%;
+                text-align: center;
+            }
 
-.logo span {{
-    color: #8b5cf6;
-}}
+            .hero h1 {
+                font-size: 64px;
+                margin-bottom: 15px;
+            }
 
-.nav a {{
-    color: #aaa;
-    text-decoration: none;
-    margin-left: 25px;
-    font-size: 14px;
-}}
+            .hero p {
+                color: #aaa;
+                font-size: 20px;
+            }
 
-.nav a:hover {{
-    color: white;
-}}
+            .button {
+                display: inline-block;
+                margin-top: 30px;
+                padding: 15px 25px;
+                background: #7c3aed;
+                border-radius: 10px;
+                color: white;
+                text-decoration: none;
+            }
 
-.hero {{
-    padding: 85px 7% 55px;
-    max-width: 1200px;
-    margin: auto;
-}}
+            .features {
+                display: flex;
+                gap: 20px;
+                justify-content: center;
+                padding: 50px 8%;
+                flex-wrap: wrap;
+            }
 
-.badge {{
-    display: inline-block;
-    padding: 8px 13px;
-    border: 1px solid rgba(139,92,246,.4);
-    background: rgba(139,92,246,.1);
-    color: #b99cff;
-    border-radius: 999px;
-    font-size: 13px;
-    margin-bottom: 22px;
-}}
+            .card {
+                background: #120b1d;
+                border: 1px solid #2b193d;
+                border-radius: 15px;
+                padding: 30px;
+                width: 240px;
+            }
 
-h1 {{
-    font-size: clamp(45px, 7vw, 78px);
-    line-height: .98;
-    letter-spacing: -4px;
-    max-width: 850px;
-}}
+            .card h2 {
+                margin-top: 0;
+            }
 
-.gradient {{
-    background: linear-gradient(90deg, #fff, #a78bfa, #60a5fa);
-    -webkit-background-clip: text;
-    color: transparent;
-}}
+            .card p {
+                color: #aaa;
+                line-height: 1.5;
+            }
+        </style>
+    </head>
 
-.subtitle {{
-    color: #a4a4b2;
-    font-size: 18px;
-    line-height: 1.6;
-    max-width: 650px;
-    margin-top: 25px;
-}}
+    <body>
 
-.buttons {{
-    display: flex;
-    gap: 12px;
-    margin-top: 32px;
-    flex-wrap: wrap;
-}}
+        <nav>
+            <div class="logo">Clipz by Greg</div>
+            <div>AI Clipping System</div>
+        </nav>
 
-.button {{
-    text-decoration: none;
-    padding: 14px 21px;
-    border-radius: 12px;
-    font-weight: 700;
-    font-size: 14px;
-}}
+        <section class="hero">
+            <h1>Turn moments into clips.</h1>
 
-.primary {{
-    background: white;
-    color: #08080d;
-}}
-
-.secondary {{
-    border: 1px solid #30303c;
-    color: white;
-    background: rgba(255,255,255,.04);
-}}
-
-.stats {{
-    max-width: 1200px;
-    margin: 20px auto 70px;
-    padding: 0 7%;
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 16px;
-}}
-
-.card {{
-    background: rgba(255,255,255,.055);
-    border: 1px solid rgba(255,255,255,.09);
-    border-radius: 20px;
-    padding: 25px;
-    backdrop-filter: blur(12px);
-}}
-
-.stat-number {{
-    font-size: 32px;
-    font-weight: 800;
-}}
-
-.stat-label {{
-    color: #858592;
-    margin-top: 7px;
-    font-size: 13px;
-}}
-
-.section {{
-    max-width: 1200px;
-    margin: auto;
-    padding: 0 7% 80px;
-}}
-
-.section h2 {{
-    font-size: 30px;
-    margin-bottom: 10px;
-}}
-
-.section p {{
-    color: #858592;
-}}
-
-.features {{
-    margin-top: 25px;
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 16px;
-}}
-
-.feature h3 {{
-    margin-bottom: 10px;
-}}
-
-.feature p {{
-    line-height: 1.5;
-    font-size: 14px;
-}}
-
-.icon {{
-    width: 42px;
-    height: 42px;
-    display: grid;
-    place-items: center;
-    border-radius: 12px;
-    background: rgba(139,92,246,.15);
-    margin-bottom: 18px;
-    color: #a78bfa;
-    font-weight: 800;
-}}
-
-footer {{
-    border-top: 1px solid rgba(255,255,255,.08);
-    padding: 25px 7%;
-    color: #666673;
-    font-size: 13px;
-}}
-
-@media (max-width: 750px) {{
-    .stats,
-    .features {{
-        grid-template-columns: 1fr;
-    }}
-
-    .nav {{
-        padding: 0 5%;
-    }}
-
-    .nav-links {{
-        display: none;
-    }}
-
-    .hero {{
-        padding-top: 60px;
-    }}
-
-    h1 {{
-        letter-spacing: -2px;
-    }}
-}}
-</style>
-</head>
-
-<body>
-
-<nav class="nav">
-    <div class="logo">Clipz <span>by Greg</span></div>
-
-    <div class="nav-links">
-        <a href="/docs">API</a>
-        <a href="/creators">Creators</a>
-        <a href="/recordings">Recordings</a>
-        <a href="/clips">Clips</a>
-    </div>
-</nav>
-
-<section class="hero">
-    <div class="badge">● CLIPZ BY GREG IS ONLINE</div>
-
-    <h1>
-        Turn moments into
-        <span class="gradient">clips.</span>
-    </h1>
-
-    <p class="subtitle">
-        A creator-focused recording and clipping platform built to organize
-        recordings, find the best moments, and turn them into shareable clips.
-    </p>
-
-    <div class="buttons">
-        <a class="button primary" href="/docs">Open Dashboard API</a>
-        <a class="button secondary" href="/creators">View Creators</a>
-    </div>
-</section>
-
-<section class="stats">
-
-    <div class="card">
-        <div class="stat-number">{creator_count}</div>
-        <div class="stat-label">Creators monitored</div>
-    </div>
-
-    <div class="card">
-        <div class="stat-number">{recording_count}</div>
-        <div class="stat-label">Recordings saved</div>
-    </div>
-
-    <div class="card">
-        <div class="stat-number">{active_count}</div>
-        <div class="stat-label">Active sessions</div>
-    </div>
-
-    <div class="card">
-        <div class="stat-number">{clip_count}</div>
-        <div class="stat-label">Clips created</div>
-    </div>
-
-</section>
-
-<section class="section">
-
-    <h2>Everything in one place.</h2>
-    <p>Built to make the clipping workflow simple.</p>
-
-    <div class="features">
-
-        <div class="card feature">
-            <div class="icon">01</div>
-            <h3>Creator Tracking</h3>
             <p>
-                Keep your authorized creators organized and connected
-                to their recordings.
+                Recordings, AI moment detection, and instant clips
+                in one system.
             </p>
-        </div>
 
-        <div class="card feature">
-            <div class="icon">02</div>
-            <h3>Recording Manager</h3>
-            <p>
-                Start and stop recording sessions and connect uploaded
-                video files to the correct creator.
-            </p>
-        </div>
+            <a class="button" href="/docs">
+                Open API
+            </a>
+        </section>
 
-        <div class="card feature">
-            <div class="icon">03</div>
-            <h3>Smart Clipping</h3>
-            <p>
-                Create clips from recordings and prepare the system
-                for future AI moment detection.
-            </p>
-        </div>
+        <section class="features">
 
-    </div>
-</section>
+            <div class="card">
+                <h2>Creators</h2>
+                <p>
+                    Keep track of creators you are authorized to monitor
+                    and process.
+                </p>
+            </div>
 
-<footer>
-    © 2026 Clipz by Greg · Creator clipping platform
-</footer>
+            <div class="card">
+                <h2>Recordings</h2>
+                <p>
+                    Store recordings and connect them to the creator
+                    they belong to.
+                </p>
+            </div>
 
-</body>
-</html>
-"""
+            <div class="card">
+                <h2>AI Moments</h2>
+                <p>
+                    Analyze recordings and identify high-energy moments
+                    that could make good clips.
+                </p>
+            </div>
 
+            <div class="card">
+                <h2>Clips</h2>
+                <p>
+                    Turn selected moments into downloadable MP4 clips.
+                </p>
+            </div>
+
+        </section>
+
+    </body>
+    </html>
+    """
+
+
+# -----------------------------
+# CREATOR
+# -----------------------------
 
 @app.post("/add-creator")
 def add_creator(request: CreatorRequest):
-    username = request.username.lstrip("@").strip()
 
-    monitored_creators.add(username)
+    username = request.username.strip().lstrip("@")
+
+    if username not in monitored_creators:
+        monitored_creators.append(username)
 
     return {
         "status": "creator added",
@@ -386,31 +248,29 @@ def add_creator(request: CreatorRequest):
 
 @app.get("/creators")
 def get_creators():
+
     return {
-        "creators": sorted(monitored_creators)
+        "creators": monitored_creators
     }
 
 
+# -----------------------------
+# RECORDING
+# -----------------------------
+
 @app.post("/start-recording")
 def start_recording(request: RecordingRequest):
-    username = request.username.lstrip("@").strip()
+
+    username = request.username.strip().lstrip("@")
 
     if username not in monitored_creators:
         return {
-            "status": "error",
-            "message": f"@{username} is not in the creator list"
-        }
-
-    if username in recording_sessions:
-        return {
-            "status": "already recording",
-            "username": username,
-            "recording_id": recording_sessions[username]["recording_id"]
+            "error": "Creator is not being monitored."
         }
 
     recording_id = str(uuid.uuid4())
 
-    recording_sessions[username] = {
+    session = {
         "recording_id": recording_id,
         "username": username,
         "started_at": now(),
@@ -418,31 +278,9 @@ def start_recording(request: RecordingRequest):
         "filename": None
     }
 
-    return recording_sessions[username]
+    recording_sessions[username] = session
 
-
-@app.post("/stop-recording")
-def stop_recording(request: RecordingRequest):
-    username = request.username.lstrip("@").strip()
-
-    session = recording_sessions.get(username)
-
-    if not session:
-        return {
-            "status": "error",
-            "message": f"No active recording for @{username}"
-        }
-
-    session["status"] = "stopped"
-    session["stopped_at"] = now()
-
-    recordings[session["recording_id"]] = session
-    del recording_sessions[username]
-
-    return {
-        "status": "recording stopped",
-        **session
-    }
+    return session
 
 
 @app.post("/upload-recording")
@@ -450,224 +288,484 @@ async def upload_recording(
     username: str = Form(...),
     file: UploadFile = File(...)
 ):
-    username = username.lstrip("@").strip()
 
-    if username not in monitored_creators:
-        return {
-            "status": "error",
-            "message": f"@{username} is not in the creator list"
-        }
+    username = username.strip().lstrip("@")
 
-    recording_id = str(uuid.uuid4())
+    recording_id = None
 
-    extension = Path(file.filename or "").suffix.lower()
+    if username in recording_sessions:
+        recording_id = recording_sessions[username]["recording_id"]
 
-    if extension not in [".mp4", ".mov", ".mkv", ".webm"]:
-        extension = ".mp4"
+    filename = f"{username}_{uuid.uuid4()}.mp4"
+    file_path = RECORDINGS_DIR / filename
 
-    filename = f"{username}_{recording_id}{extension}"
-    filepath = RECORDINGS_DIR / filename
+    with open(file_path, "wb") as f:
+        f.write(await file.read())
 
-    content = await file.read()
-
-    with open(filepath, "wb") as output:
-        output.write(content)
-
-    active_session = recording_sessions.get(username)
-
-    if active_session:
-        active_session["filename"] = filename
-        active_session["file_path"] = str(filepath)
-        active_session["file_size"] = len(content)
-        active_session["uploaded_at"] = now()
-
-        recordings[active_session["recording_id"]] = active_session
-
-        return {
-            "status": "recording uploaded",
-            "recording_id": active_session["recording_id"],
-            "username": username,
-            "filename": filename,
-            "linked_to_session": True
-        }
-
-    recordings[recording_id] = {
-        "recording_id": recording_id,
+    recording = {
+        "recording_id": recording_id or str(uuid.uuid4()),
         "username": username,
         "filename": filename,
-        "file_path": str(filepath),
-        "file_size": len(content),
-        "status": "uploaded",
+        "file_path": str(file_path),
         "uploaded_at": now()
     }
 
+    recordings.append(recording)
+
     return {
         "status": "recording uploaded",
-        "recording_id": recording_id,
+        "recording_id": recording["recording_id"],
         "username": username,
         "filename": filename,
-        "linked_to_session": False
+        "linked_to_session": recording_id is not None
     }
+
+
+@app.post("/stop-recording")
+def stop_recording(request: RecordingRequest):
+
+    username = request.username.strip().lstrip("@")
+
+    session = recording_sessions.get(username)
+
+    if not session:
+        return {
+            "error": "No active recording."
+        }
+
+    session["status"] = "stopped"
+    session["stopped_at"] = now()
+
+    return session
 
 
 @app.get("/recordings")
 def get_recordings():
+
     return {
-        "recordings": list(recordings.values())
+        "recordings": recordings
     }
 
 
-# -----------------------------------
-# CLIP TEST
-# -----------------------------------
+# -----------------------------
+# AI BEST MOMENTS
+# -----------------------------
 
-@app.post("/create-clip")
-def create_clip(request: ClipRequest):
+@app.post("/find-best-moments")
+def find_best_moments(request: BestMomentsRequest):
 
-    username = request.username.lstrip("@").strip()
+    username = request.username.strip().lstrip("@")
 
-    creator_recordings = [
-        r for r in recordings.values()
-        if r.get("username") == username
-    ]
+    recording = get_latest_recording(username)
 
-    if not creator_recordings:
+    if not recording:
         return {
-            "status": "error",
-            "message": f"No recordings found for @{username}"
-        }
-
-    recording = creator_recordings[-1]
-
-    if "file_path" not in recording:
-        return {
-            "status": "error",
-            "message": "Recording has no video file attached."
+            "error": "No recording found for this creator."
         }
 
     input_file = Path(recording["file_path"])
 
     if not input_file.exists():
         return {
-            "status": "error",
-            "message": "Recording file does not exist on the server."
+            "error": "Recording file does not exist on the server."
+        }
+
+    # Get video duration
+    probe = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(input_file)
+        ],
+        capture_output=True,
+        text=True
+    )
+
+    try:
+        duration = float(probe.stdout.strip())
+    except:
+        return {
+            "error": "Could not determine recording duration."
+        }
+
+    if duration <= 5:
+        return {
+            "error": "Recording is too short."
+        }
+
+    # ---------------------------------
+    # First AI-style scoring pass
+    # ---------------------------------
+    #
+    # We divide the recording into sections.
+    # FFmpeg measures audio energy in each section.
+    # Louder / more energetic sections receive
+    # higher scores.
+    #
+
+    segment_length = 10
+
+    segments = []
+
+    current = 0
+
+    while current < duration:
+
+        remaining = duration - current
+
+        length = min(segment_length, remaining)
+
+        if length >= 3:
+
+            result = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-ss",
+                    str(current),
+                    "-t",
+                    str(length),
+                    "-i",
+                    str(input_file),
+                    "-af",
+                    "volumedetect",
+                    "-f",
+                    "null",
+                    "-"
+                ],
+                capture_output=True,
+                text=True
+            )
+
+            output = result.stderr
+
+            mean_volume = -60.0
+
+            for line in output.splitlines():
+
+                if "mean_volume" in line:
+
+                    try:
+                        mean_volume = float(
+                            line.split("mean_volume:")[1]
+                            .split("dB")[0]
+                            .strip()
+                        )
+                    except:
+                        pass
+
+            segments.append({
+                "start_time": round(current, 2),
+                "duration": round(length, 2),
+                "mean_volume": mean_volume
+            })
+
+        current += segment_length
+
+    # Rank segments by energy
+    segments.sort(
+        key=lambda x: x["mean_volume"],
+        reverse=True
+    )
+
+    top_segments = segments[:5]
+
+    moments = []
+
+    for index, segment in enumerate(top_segments, start=1):
+
+        start = max(
+            0,
+            segment["start_time"] - 5
+        )
+
+        clip_duration = min(
+            30,
+            duration - start
+        )
+
+        moments.append({
+            "rank": index,
+            "start_time": round(start, 2),
+            "end_time": round(
+                start + clip_duration,
+                2
+            ),
+            "duration": round(
+                clip_duration,
+                2
+            ),
+            "score": round(
+                max(
+                    0,
+                    min(
+                        100,
+                        (segment["mean_volume"] + 60) * 2
+                    )
+                ),
+                1
+            )
+        })
+
+    best_moments[username] = {
+        "username": username,
+        "recording_id": recording["recording_id"],
+        "analyzed_at": now(),
+        "moments": moments
+    }
+
+    return best_moments[username]
+
+
+@app.get("/best-moments/{username}")
+def get_best_moments(username: str):
+
+    username = username.strip().lstrip("@")
+
+    result = best_moments.get(username)
+
+    if not result:
+        return {
+            "error": "No AI analysis has been run yet."
+        }
+
+    return result
+
+
+# -----------------------------
+# CREATE NORMAL CLIP
+# -----------------------------
+
+@app.post("/create-clip")
+def create_clip(request: ClipRequest):
+
+    username = request.username.strip().lstrip("@")
+
+    recording = get_latest_recording(username)
+
+    if not recording:
+        return {
+            "error": "No recording found."
+        }
+
+    input_file = Path(recording["file_path"])
+
+    if not input_file.exists():
+        return {
+            "error": "Recording file does not exist."
         }
 
     clip_id = str(uuid.uuid4())
 
-    output_file = CLIPS_DIR / f"{username}_{clip_id}.mp4"
+    filename = f"{username}_{clip_id}.mp4"
 
-    try:
+    output_file = CLIPS_DIR / filename
 
-        result = subprocess.run(
-            [
-                "ffmpeg",
-                "-y",
-                "-i",
-                str(input_file),
-                "-t",
-                "30",
-                "-c:v",
-                "libx264",
-                "-c:a",
-                "aac",
-                str(output_file)
-            ],
-            capture_output=True,
-            text=True
-        )
-
-    except FileNotFoundError:
-
-        return {
-            "status": "error",
-            "message": "FFmpeg is not installed on the server yet."
-        }
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(input_file),
+            "-t",
+            "30",
+            "-c:v",
+            "libx264",
+            "-c:a",
+            "aac",
+            str(output_file)
+        ],
+        capture_output=True,
+        text=True
+    )
 
     if result.returncode != 0:
 
         return {
-            "status": "error",
-            "message": "FFmpeg failed to create the clip.",
-            "details": result.stderr[-1000:]
+            "error": "FFmpeg failed.",
+            "details": result.stderr[-2000:]
         }
 
-    clips[clip_id] = {
+    clip = {
         "clip_id": clip_id,
         "username": username,
         "recording_id": recording["recording_id"],
-        "filename": output_file.name,
+        "filename": filename,
         "file_path": str(output_file),
         "created_at": now(),
         "duration": 30
     }
 
+    clips.append(clip)
+
     return {
         "status": "clip created",
-        **clips[clip_id]
+        **clip
     }
 
 
+# -----------------------------
+# CREATE AI CLIP
+# -----------------------------
+
+@app.post("/create-ai-clip")
+def create_ai_clip(request: AIClipRequest):
+
+    username = request.username.strip().lstrip("@")
+
+    recording = get_latest_recording(username)
+
+    if not recording:
+        return {
+            "error": "No recording found."
+        }
+
+    input_file = Path(recording["file_path"])
+
+    if not input_file.exists():
+        return {
+            "error": "Recording file does not exist."
+        }
+
+    start_time = max(0, request.start_time)
+
+    duration = max(
+        5,
+        min(60, request.duration)
+    )
+
+    clip_id = str(uuid.uuid4())
+
+    filename = f"{username}_{clip_id}.mp4"
+
+    output_file = CLIPS_DIR / filename
+
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-ss",
+            str(start_time),
+            "-i",
+            str(input_file),
+            "-t",
+            str(duration),
+            "-c:v",
+            "libx264",
+            "-c:a",
+            "aac",
+            str(output_file)
+        ],
+        capture_output=True,
+        text=True
+    )
+
+    if result.returncode != 0:
+
+        return {
+            "error": "FFmpeg failed.",
+            "details": result.stderr[-2000:]
+        }
+
+    clip = {
+        "clip_id": clip_id,
+        "username": username,
+        "recording_id": recording["recording_id"],
+        "filename": filename,
+        "file_path": str(output_file),
+        "created_at": now(),
+        "start_time": start_time,
+        "duration": duration,
+        "source": "ai_best_moment"
+    }
+
+    clips.append(clip)
+
+    return {
+        "status": "AI clip created",
+        **clip
+    }
+
+
+# -----------------------------
+# CLIPS
+# -----------------------------
+
 @app.get("/clips")
 def get_clips():
+
     return {
-        "clips": list(clips.values())
+        "clips": clips
     }
 
 
 @app.get("/clip/{clip_id}")
 def get_clip(clip_id: str):
 
-    clip = clips.get(clip_id)
+    for clip in clips:
 
-    if not clip:
-        return {
-            "status": "error",
-            "message": "Clip not found."
-        }
+        if clip["clip_id"] == clip_id:
 
-    filepath = Path(clip["file_path"])
+            file_path = Path(clip["file_path"])
 
-    if not filepath.exists():
-        return {
-            "status": "error",
-            "message": "Clip file no longer exists."
-        }
+            if file_path.exists():
 
-    return FileResponse(
-        filepath,
-        media_type="video/mp4",
-        filename=clip["filename"]
-    )
+                return FileResponse(
+                    file_path,
+                    media_type="video/mp4",
+                    filename=clip["filename"]
+                )
 
+    return {
+        "error": "Clip not found."
+    }
+
+
+# -----------------------------
+# STATUS
+# -----------------------------
 
 @app.get("/recording-status/{username}")
 def recording_status(username: str):
-    username = username.lstrip("@").strip()
 
-    session = recording_sessions.get(username)
+    username = username.strip().lstrip("@")
 
-    if session:
-        return session
-
-    return {
-        "username": username,
-        "status": "not recording"
-    }
+    return recording_sessions.get(
+        username,
+        {
+            "username": username,
+            "status": "not recording"
+        }
+    )
 
 
 @app.get("/health")
 def health():
+
     return {
         "status": "ok",
         "service": "Clipz by Greg"
     }
 
 
+# -----------------------------
+# START SERVER
+# -----------------------------
+
 if __name__ == "__main__":
+
     import uvicorn
 
-    port = int(os.getenv("PORT", "8000"))
+    port = int(
+        os.environ.get(
+            "PORT",
+            8000
+        )
+    )
 
     uvicorn.run(
         app,
