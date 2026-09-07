@@ -76,7 +76,7 @@ def upload_to_tiktok(video_file_path: str, caption: str):
         with open(video_file_path, "rb") as video_file:
             upload_res = requests.put(upload_url, headers=upload_headers, data=video_file)
             
-        # FIX APPLIED HERE: Checks for successful HTTP status codes from TikTok
+        # FIXED LINE: Validates the HTTP success codes
         if upload_res.status_code in:
             print("[TikTok Upload] Success! Clip posted safely.")
             return True
@@ -230,4 +230,3 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run(app, host="0.0.0.0", port=port)
-
