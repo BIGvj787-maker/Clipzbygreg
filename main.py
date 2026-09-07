@@ -1,62 +1,43 @@
 import os
-import json
 import uuid
-import shutil
 import subprocess
 import threading
-import time
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from datetime import datetime, timezone
+from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException, UploadFile, File
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel
 
 app = FastAPI(title="Clipz by Greg")
 
-# Persistent storage location.
-# On Render, point a persistent disk at /var/data if you want files
-# to survive restarts/deploys.
-DATA_DIR = Path(os.getenv("DATA_DIR", "/var/data"))
+# =========================
+# STORAGE
+# =========================
+
+DATA_DIR = Path(os.getenv("DATA_DIR", "./data"))
+
 RECORDINGS_DIR = DATA_DIR / "recordings"
 CLIPS_DIR = DATA_DIR / "clips"
-CREATORS_FILE = DATA_DIR / "creators.json"
+TEMP_DIR = DATA_DIR / "temp"
 
-RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
-CLIPS_DIR.mkdir(parents=True, exist_ok=True)
-DATA_DIR.mkdir(parents=True, exist_ok=True)
+for folder in (RECORDINGS_DIR, CLIPS_DIR, TEMP_DIR):
+    folder.mkdir(parents=True, exist_ok=True)
 
-lock = threading.Lock()
+creators = {}
+recordings = {}
+clips = {}
 live_processes = {}
+live_sessions = {}
 
 
-def now():
-    return datetime.now(timezone.utc).isoformat()
-
-
-def load_creators():
-    if not CREATORS_FILE.exists():
-        return {}
-
-    try:
-        return json.loads(CREATORS_FILE.read_text())
-    except Exception:
-        return {}
-
-
-def save_creators(creators):
-    temp = CREATORS_FILE.with_suffix(".tmp")
-    temp.write_text(json.dumps(creators, indent=2))
-    temp.replace(CREATORS_FILE)
-
-
-creators = load_creators()
-
+# =========================
+# MODELS
+# =========================
 
 class CreatorRequest(BaseModel):
     username: str
-    profile_url: Optional[str] = None
 
 
 class LiveRecordingRequest(BaseModel):
@@ -64,147 +45,273 @@ class LiveRecordingRequest(BaseModel):
     stream_url: str
 
 
-class ManualRecordingRequest(BaseModel):
-    username: str
+class ClipRequest(BaseModel):
+    recording_id: str
+    start_time: float = 0
+    duration: float = 30
 
 
-def normalize_username(username: str):
-    username = username.strip()
+class AIClipRequest(BaseModel):
+    recording_id: str
+    moment_rank: int = 1
 
-    if username.startswith("@"):
-        username = username[1:]
+
+class TwoClipRequest(BaseModel):
+    recording_id: str
+    start_time: float = 0
+    duration: float = 30
+
+
+# =========================
+# HELPERS
+# =========================
+
+def now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def clean_username(username):
+    username = username.strip().lstrip("@")
 
     if not username:
-        raise HTTPException(status_code=400, detail="Username is required")
+        raise HTTPException(
+            status_code=400,
+            detail="Username is required"
+        )
 
     return username
 
 
+def validate_stream_url(stream_url):
+    parsed = urlparse(stream_url)
+
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(
+            status_code=400,
+            detail="Only HTTP and HTTPS stream URLs are supported"
+        )
+
+    if not parsed.netloc:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid stream URL"
+        )
+
+
+def get_duration(path):
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(path)
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+
+        if result.returncode == 0:
+            return float(result.stdout.strip())
+
+    except Exception:
+        pass
+
+    return 0
+
+
+# =========================
+# HOME
+# =========================
+
 @app.get("/", response_class=HTMLResponse)
 def home():
+
     return """
     <!DOCTYPE html>
     <html>
     <head>
         <title>Clipz by Greg</title>
+
         <style>
             body {
+                margin: 0;
+                background: #090611;
+                color: white;
                 font-family: Arial, sans-serif;
-                max-width: 850px;
-                margin: 50px auto;
-                padding: 20px;
             }
-            h1 { margin-bottom: 5px; }
+
+            nav {
+                padding: 22px 7%;
+                border-bottom: 1px solid #241b35;
+                display: flex;
+                justify-content: space-between;
+            }
+
+            .logo {
+                font-size: 24px;
+                font-weight: bold;
+            }
+
+            .hero {
+                text-align: center;
+                padding: 90px 7%;
+            }
+
+            h1 {
+                font-size: 60px;
+            }
+
+            .purple {
+                color: #a855f7;
+            }
+
+            p {
+                color: #aaa;
+                font-size: 18px;
+            }
+
+            .cards {
+                display: grid;
+                grid-template-columns:
+                    repeat(auto-fit, minmax(220px, 1fr));
+                gap: 20px;
+                padding: 20px 7%;
+            }
+
             .card {
-                border: 1px solid #ddd;
-                border-radius: 12px;
-                padding: 20px;
-                margin-top: 20px;
+                padding: 25px;
+                background: #120d1d;
+                border: 1px solid #2c2140;
+                border-radius: 18px;
             }
-            code {
-                background: #f3f3f3;
-                padding: 3px 6px;
-                border-radius: 5px;
+
+            a {
+                color: #c084fc;
+                text-decoration: none;
             }
         </style>
     </head>
+
     <body>
-        <h1>Clipz by Greg</h1>
-        <p>Creator monitoring and AI clipping system.</p>
 
-        <div class="card">
-            <h2>API</h2>
-            <p><a href="/docs">Open API Docs</a></p>
-        </div>
+        <nav>
+            <div class="logo">
+                Clipz by Greg
+            </div>
 
-        <div class="card">
-            <h2>Pipeline</h2>
+            <a href="/docs">
+                API Docs
+            </a>
+        </nav>
+
+        <section class="hero">
+
+            <h1>
+                <span class="purple">Clipz</span> by Greg
+            </h1>
+
             <p>
-                Creator → monitoring → supported LIVE source →
-                recording → AI moments → clips
+                Record authorized live feeds, find the best moments,
+                and create short-form clips.
             </p>
-        </div>
+
+        </section>
+
+        <section class="cards">
+
+            <div class="card">
+                <h2>Any Creator</h2>
+                <p>
+                    Add and manage any creator by username.
+                </p>
+            </div>
+
+            <div class="card">
+                <h2>LIVE Recording</h2>
+                <p>
+                    Record an authorized live feed with FFmpeg.
+                </p>
+            </div>
+
+            <div class="card">
+                <h2>AI Moments</h2>
+                <p>
+                    Find high-energy moments in recordings.
+                </p>
+            </div>
+
+            <div class="card">
+                <h2>Two Clips</h2>
+                <p>
+                    Generate a clear version and a vertical
+                    blurred-background version.
+                </p>
+            </div>
+
+        </section>
+
     </body>
     </html>
     """
 
 
+# =========================
+# HEALTH
+# =========================
+
 @app.get("/health")
 def health():
+
     return {
-        "status": "ok",
-        "creators": len(creators),
-        "active_recordings": len(live_processes)
+        "status": "online",
+        "service": "Clipz by Greg"
     }
 
 
+# =========================
+# CREATORS
+# =========================
+
 @app.post("/add-creator")
-def add_creator(data: CreatorRequest):
-    username = normalize_username(data.username)
+def add_creator(request: CreatorRequest):
 
-    with lock:
-        creators[username] = {
-            "username": username,
-            "profile_url": data.profile_url
-            or f"https://www.tiktok.com/@{username}",
-            "monitoring": True,
-            "live_status": "unknown",
-            "recording": False,
-            "recording_id": None,
-            "added_at": creators.get(username, {}).get("added_at", now()),
-            "updated_at": now(),
-            "source_status": "pending_source"
-        }
+    username = clean_username(request.username)
 
-        save_creators(creators)
+    creators[username] = {
+        "username": username,
+        "monitoring": True,
+        "added_at": now()
+    }
 
     return {
         "status": "creator added",
         "username": username,
-        "monitoring": True,
-        "source_status": "pending_source"
+        "monitoring": True
     }
 
 
 @app.get("/creators")
 def get_creators():
+
     return list(creators.values())
 
 
-@app.get("/creator/{username}")
-def get_creator(username: str):
-    username = normalize_username(username)
+@app.post("/remove-creator")
+def remove_creator(request: CreatorRequest):
 
-    creator = creators.get(username)
+    username = clean_username(request.username)
 
-    if not creator:
+    if username not in creators:
         raise HTTPException(
             status_code=404,
-            detail="Creator is not being monitored"
+            detail="Creator not found"
         )
 
-    return creator
-
-
-@app.delete("/remove-creator/{username}")
-def remove_creator(username: str):
-    username = normalize_username(username)
-
-    with lock:
-        if username not in creators:
-            raise HTTPException(
-                status_code=404,
-                detail="Creator is not being monitored"
-            )
-
-        if creators[username].get("recording"):
-            raise HTTPException(
-                status_code=400,
-                detail="Stop the active recording before removing creator"
-            )
-
-        del creators[username]
-        save_creators(creators)
+    creators.pop(username)
 
     return {
         "status": "creator removed",
@@ -212,9 +319,14 @@ def remove_creator(username: str):
     }
 
 
+# =========================
+# AUTHORIZED LIVE RECORDER
+# =========================
+
 @app.post("/start-live-recording")
-def start_live_recording(data: LiveRecordingRequest):
-    username = normalize_username(data.username)
+def start_live_recording(request: LiveRecordingRequest):
+
+    username = clean_username(request.username)
 
     if username not in creators:
         raise HTTPException(
@@ -222,298 +334,669 @@ def start_live_recording(data: LiveRecordingRequest):
             detail="Creator is not being monitored"
         )
 
-    stream_url = data.stream_url.strip()
-
-    if not (
-        stream_url.startswith("http://")
-        or stream_url.startswith("https://")
-    ):
+    if username in live_processes:
         raise HTTPException(
-            status_code=400,
-            detail="Only HTTP and HTTPS stream URLs are supported"
-        )
-
-    if creators[username].get("recording"):
-        raise HTTPException(
-            status_code=400,
+            status_code=409,
             detail="Creator is already being recorded"
         )
 
+    validate_stream_url(request.stream_url)
+
     recording_id = str(uuid.uuid4())
 
-    temp_file = RECORDINGS_DIR / f"{username}_{recording_id}.mkv"
-    final_file = RECORDINGS_DIR / f"{username}_{recording_id}.mp4"
+    temp_path = TEMP_DIR / (
+        f"{username}_{recording_id}.mkv"
+    )
+
+    final_path = RECORDINGS_DIR / (
+        f"{username}_{recording_id}.mp4"
+    )
 
     command = [
         "ffmpeg",
+        "-hide_banner",
+        "-loglevel", "warning",
         "-y",
+
+        "-reconnect", "1",
+        "-reconnect_streamed", "1",
+        "-reconnect_delay_max", "5",
+
         "-i",
-        stream_url,
-        "-c",
-        "copy",
-        str(temp_file)
+        request.stream_url,
+
+        "-map", "0",
+        "-c", "copy",
+
+        "-f", "matroska",
+
+        str(temp_path)
     ]
 
     try:
+
         process = subprocess.Popen(
             command,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL
         )
-    except Exception as e:
+
+    except FileNotFoundError:
+
         raise HTTPException(
             status_code=500,
-            detail=f"Could not start FFmpeg: {e}"
+            detail="FFmpeg is unavailable"
         )
 
-    live_processes[username] = {
-        "process": process,
+    live_processes[username] = process
+
+    live_sessions[username] = {
         "recording_id": recording_id,
-        "temp_file": str(temp_file),
-        "final_file": str(final_file),
-        "started_at": now()
+        "username": username,
+        "started_at": now(),
+        "temp_path": str(temp_path),
+        "final_path": str(final_path)
     }
 
-    with lock:
-        creators[username]["recording"] = True
-        creators[username]["live_status"] = "live"
-        creators[username]["recording_id"] = recording_id
-        creators[username]["updated_at"] = now()
-        creators[username]["source_status"] = "connected"
-        save_creators(creators)
+    threading.Thread(
+        target=watch_live,
+        args=(username, recording_id, process),
+        daemon=True
+    ).start()
 
     return {
         "status": "live recording started",
         "recording_id": recording_id,
         "username": username,
-        "started_at": live_processes[username]["started_at"]
+        "started_at": live_sessions[username]["started_at"]
     }
 
 
+def watch_live(username, recording_id, process):
+
+    process.wait()
+
+    finalize_live(
+        username,
+        recording_id
+    )
+
+
+def finalize_live(username, recording_id):
+
+    session = live_sessions.get(username)
+
+    if not session:
+        return
+
+    temp_path = Path(
+        session["temp_path"]
+    )
+
+    final_path = Path(
+        session["final_path"]
+    )
+
+    if not temp_path.exists():
+        live_processes.pop(username, None)
+        live_sessions.pop(username, None)
+        return
+
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(temp_path),
+            "-c", "copy",
+            "-movflags", "+faststart",
+            str(final_path)
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+
+    if result.returncode != 0:
+        final_path = temp_path
+
+    duration = get_duration(final_path)
+
+    size = final_path.stat().st_size if final_path.exists() else 0
+
+    recordings[recording_id] = {
+        "recording_id": recording_id,
+        "username": username,
+        "started_at": session["started_at"],
+        "stopped_at": now(),
+        "filename": final_path.name,
+        "file_path": str(final_path),
+        "file_size": size,
+        "duration": duration,
+        "status": "completed",
+        "source": "authorized_live_feed"
+    }
+
+    if temp_path.exists() and temp_path != final_path:
+
+        try:
+            temp_path.unlink()
+        except Exception:
+            pass
+
+    live_processes.pop(username, None)
+    live_sessions.pop(username, None)
+
+
 @app.get("/live-recording-status/{username}")
-def live_recording_status(username: str):
-    username = normalize_username(username)
+def live_status(username: str):
 
-    if username not in creators:
-        raise HTTPException(
-            status_code=404,
-            detail="Creator is not being monitored"
-        )
+    username = clean_username(username)
 
-    active = live_processes.get(username)
-
-    if not active:
-        return {
-            "username": username,
-            "recording": False,
-            "status": "not_recording",
-            "creator": creators[username]
-        }
-
-    process = active["process"]
-
-    if process.poll() is not None:
-        finish_live_recording(username)
+    if username not in live_processes:
 
         return {
             "username": username,
             "recording": False,
-            "status": "recording_process_ended"
+            "status": "not_recording"
         }
+
+    process = live_processes[username]
+    session = live_sessions[username]
 
     return {
         "username": username,
         "recording": True,
         "status": "recording",
-        "recording_id": active["recording_id"],
-        "started_at": active["started_at"]
-    }
-
-
-def finish_live_recording(username):
-    active = live_processes.get(username)
-
-    if not active:
-        return None
-
-    process = active["process"]
-
-    if process.poll() is None:
-        process.terminate()
-
-        try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            process.kill()
-
-    temp_file = Path(active["temp_file"])
-    final_file = Path(active["final_file"])
-
-    if temp_file.exists() and temp_file.stat().st_size > 0:
-        remux_command = [
-            "ffmpeg",
-            "-y",
-            "-i",
-            str(temp_file),
-            "-c",
-            "copy",
-            str(final_file)
-        ]
-
-        subprocess.run(
-            remux_command,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
-
-        temp_file.unlink(missing_ok=True)
-
-    recording_id = active["recording_id"]
-
-    live_processes.pop(username, None)
-
-    with lock:
-        if username in creators:
-            creators[username]["recording"] = False
-            creators[username]["live_status"] = "offline"
-            creators[username]["recording_id"] = None
-            creators[username]["updated_at"] = now()
-            save_creators(creators)
-
-    return {
-        "recording_id": recording_id,
-        "username": username,
-        "filename": final_file.name if final_file.exists() else None,
-        "path": str(final_file) if final_file.exists() else None
+        "recording_id": session["recording_id"],
+        "started_at": session["started_at"],
+        "process_running": process.poll() is None
     }
 
 
 @app.post("/stop-live-recording")
-def stop_live_recording(data: ManualRecordingRequest):
-    username = normalize_username(data.username)
+def stop_live(request: CreatorRequest):
+
+    username = clean_username(request.username)
 
     if username not in live_processes:
+
         raise HTTPException(
             status_code=404,
-            detail="No active LIVE recording"
+            detail="No LIVE recording found"
         )
 
-    result = finish_live_recording(username)
+    process = live_processes[username]
+
+    recording_id = live_sessions[username]["recording_id"]
+
+    process.terminate()
+
+    try:
+        process.wait(timeout=15)
+
+    except subprocess.TimeoutExpired:
+
+        process.kill()
+        process.wait()
+
+    finalize_live(
+        username,
+        recording_id
+    )
 
     return {
         "status": "live recording stopped",
-        **result
+        "recording": recordings.get(recording_id)
     }
 
 
+# =========================
+# RECORDINGS
+# =========================
+
 @app.get("/recordings")
-def recordings():
-    results = []
+def get_recordings():
 
-    for file in sorted(RECORDINGS_DIR.glob("*"), key=lambda x: x.stat().st_mtime):
-        if file.suffix.lower() not in [".mp4", ".mkv", ".mov"]:
-            continue
+    return list(recordings.values())
 
-        results.append({
-            "filename": file.name,
-            "path": str(file),
-            "size": file.stat().st_size
+
+# =========================
+# AI MOMENT DETECTION
+# =========================
+
+def analyze_audio(file_path):
+
+    duration = get_duration(file_path)
+
+    if duration <= 0:
+        return []
+
+    window = 5
+    moments = []
+
+    position = 0
+
+    while position < duration:
+
+        end = min(
+            position + window,
+            duration
+        )
+
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-ss", str(position),
+                "-t", str(end - position),
+                "-i", str(file_path),
+                "-af", "volumedetect",
+                "-f", "null",
+                "-"
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+
+        volume = -60
+
+        for line in result.stderr.splitlines():
+
+            if "mean_volume" in line:
+
+                try:
+                    volume = float(
+                        line.split(":")[-1]
+                        .strip()
+                        .replace(" dB", "")
+                    )
+                except Exception:
+                    pass
+
+        score = max(
+            0,
+            min(
+                100,
+                (volume + 60) * 2
+            )
+        )
+
+        moments.append({
+            "start_time": round(position, 2),
+            "end_time": round(end, 2),
+            "duration": round(end - position, 2),
+            "score": round(score, 1)
         })
 
-    return results
+        position += window
+
+    moments.sort(
+        key=lambda x: x["score"],
+        reverse=True
+    )
+
+    best = moments[:3]
+
+    for i, moment in enumerate(best, 1):
+        moment["rank"] = i
+
+    return best
 
 
-@app.get("/recording/{filename}")
-def get_recording(filename: str):
-    safe_name = Path(filename).name
-    file = RECORDINGS_DIR / safe_name
+@app.post("/find-best-moments")
+def find_best_moments(request: CreatorRequest):
 
-    if not file.exists():
+    username = clean_username(request.username)
+
+    matches = [
+        r for r in recordings.values()
+        if r["username"] == username
+        and r.get("file_path")
+    ]
+
+    if not matches:
+
+        raise HTTPException(
+            status_code=404,
+            detail="No recording found for this creator"
+        )
+
+    recording = matches[-1]
+
+    path = Path(
+        recording["file_path"]
+    )
+
+    if not path.exists():
+
+        raise HTTPException(
+            status_code=404,
+            detail="Recording file not found"
+        )
+
+    moments = analyze_audio(path)
+
+    return {
+        "username": username,
+        "recording_id": recording["recording_id"],
+        "analyzed_at": now(),
+        "moments": moments
+    }
+
+
+# =========================
+# NORMAL CLIP
+# =========================
+
+@app.post("/create-clip")
+def create_clip(request: ClipRequest):
+
+    recording = recordings.get(
+        request.recording_id
+    )
+
+    if not recording:
+
         raise HTTPException(
             status_code=404,
             detail="Recording not found"
         )
 
-    return FileResponse(file)
+    input_path = Path(
+        recording["file_path"]
+    )
+
+    if not input_path.exists():
+
+        raise HTTPException(
+            status_code=404,
+            detail="Recording file not found"
+        )
+
+    clip_id = str(uuid.uuid4())
+
+    username = recording["username"]
+
+    filename = (
+        f"{username}_{clip_id}.mp4"
+    )
+
+    output_path = CLIPS_DIR / filename
+
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-ss", str(request.start_time),
+            "-i", str(input_path),
+            "-t", str(request.duration),
+            "-c", "copy",
+            str(output_path)
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+
+    if result.returncode != 0:
+
+        raise HTTPException(
+            status_code=500,
+            detail="FFmpeg failed to create clip"
+        )
+
+    clip = {
+        "clip_id": clip_id,
+        "username": username,
+        "recording_id": request.recording_id,
+        "filename": filename,
+        "file_path": str(output_path),
+        "created_at": now(),
+        "duration": request.duration,
+        "type": "full_clear"
+    }
+
+    clips[clip_id] = clip
+
+    return {
+        "status": "clip created",
+        **clip
+    }
 
 
-@app.post("/upload-recording")
-async def upload_recording(
-    username: str,
-    recording_id: str,
-    file: UploadFile = File(...)
+# =========================
+# VERTICAL CLIP
+# =========================
+
+def create_vertical(
+    input_path,
+    output_path,
+    start,
+    duration
 ):
-    username = normalize_username(username)
 
-    if username not in creators:
-        raise HTTPException(
-            status_code=404,
-            detail="Creator is not being monitored"
-        )
+    filter_complex = (
+        "[0:v]"
+        "scale=1080:1920:"
+        "force_original_aspect_ratio=increase,"
+        "crop=1080:1920,"
+        "boxblur=30:10[bg];"
 
-    filename = f"{username}_{recording_id}_{Path(file.filename).name}"
-    destination = RECORDINGS_DIR / filename
+        "[0:v]"
+        "scale=1080:1920:"
+        "force_original_aspect_ratio=decrease[fg];"
 
-    with destination.open("wb") as output:
-        shutil.copyfileobj(file.file, output)
-
-    return {
-        "status": "recording uploaded",
-        "recording_id": recording_id,
-        "username": username,
-        "filename": filename
-    }
-
-
-@app.get("/monitoring-summary")
-def monitoring_summary():
-    total = len(creators)
-    monitoring = sum(
-        1 for c in creators.values()
-        if c.get("monitoring")
-    )
-    recording = sum(
-        1 for c in creators.values()
-        if c.get("recording")
+        "[bg][fg]"
+        "overlay=(W-w)/2:(H-h)/2"
     )
 
-    return {
-        "total_creators": total,
-        "monitoring": monitoring,
-        "currently_recording": recording,
-        "creators": list(creators.values())
-    }
+    return subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-ss", str(start),
+            "-i", str(input_path),
+            "-t", str(duration),
+
+            "-filter_complex",
+            filter_complex,
+
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "20",
+
+            "-c:a", "aac",
+            "-b:a", "192k",
+
+            "-movflags",
+            "+faststart",
+
+            str(output_path)
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
 
 
-@app.post("/set-source-status/{username}")
-def set_source_status(username: str, status: str):
-    username = normalize_username(username)
+# =========================
+# TWO CLIPS
+# =========================
 
-    if username not in creators:
+@app.post("/create-two-clips")
+def create_two_clips(request: TwoClipRequest):
+
+    recording = recordings.get(
+        request.recording_id
+    )
+
+    if not recording:
+
         raise HTTPException(
             status_code=404,
-            detail="Creator is not being monitored"
+            detail="Recording not found"
         )
 
-    allowed = {
-        "pending_source",
-        "connected",
-        "offline",
-        "error"
+    input_path = Path(
+        recording["file_path"]
+    )
+
+    if not input_path.exists():
+
+        raise HTTPException(
+            status_code=404,
+            detail="Recording file not found"
+        )
+
+    username = recording["username"]
+
+    # Full clear version
+
+    full_id = str(uuid.uuid4())
+
+    full_filename = (
+        f"{username}_{full_id}.mp4"
+    )
+
+    full_path = CLIPS_DIR / full_filename
+
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-ss", str(request.start_time),
+            "-i", str(input_path),
+            "-t", str(request.duration),
+            "-c", "copy",
+            str(full_path)
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+
+    if result.returncode != 0:
+
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to create full clip"
+        )
+
+    full_clip = {
+        "clip_id": full_id,
+        "username": username,
+        "recording_id": request.recording_id,
+        "filename": full_filename,
+        "file_path": str(full_path),
+        "created_at": now(),
+        "duration": request.duration,
+        "type": "full_clear"
     }
 
-    if status not in allowed:
+    clips[full_id] = full_clip
+
+    # Vertical blurred version
+
+    vertical_id = str(uuid.uuid4())
+
+    vertical_filename = (
+        f"{username}_{vertical_id}.mp4"
+    )
+
+    vertical_path = CLIPS_DIR / vertical_filename
+
+    result = create_vertical(
+        input_path,
+        vertical_path,
+        request.start_time,
+        request.duration
+    )
+
+    if result.returncode != 0:
+
         raise HTTPException(
-            status_code=400,
-            detail=f"Status must be one of: {', '.join(sorted(allowed))}"
+            status_code=500,
+            detail="Failed to create vertical clip"
         )
 
-    creators[username]["source_status"] = status
-    creators[username]["updated_at"] = now()
+    vertical_clip = {
+        "clip_id": vertical_id,
+        "username": username,
+        "recording_id": request.recording_id,
+        "filename": vertical_filename,
+        "file_path": str(vertical_path),
+        "created_at": now(),
+        "duration": request.duration,
+        "type": "vertical_blurred"
+    }
 
-    save_creators(creators)
+    clips[vertical_id] = vertical_clip
 
     return {
-        "username": username,
-        "source_status": status
+        "status": "two clips created",
+        "full_clip": full_clip,
+        "vertical_clip": vertical_clip
     }
+
+
+# =========================
+# CLIPS
+# =========================
+
+@app.get("/clips")
+def get_clips():
+
+    return list(clips.values())
+
+
+@app.get("/clip/{clip_id}")
+def get_clip(clip_id: str):
+
+    clip = clips.get(clip_id)
+
+    if not clip:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Clip not found"
+        )
+
+    path = Path(
+        clip["file_path"]
+    )
+
+    if not path.exists():
+
+        raise HTTPException(
+            status_code=404,
+            detail="Clip file not found"
+        )
+
+    return FileResponse(
+        path,
+        media_type="video/mp4",
+        filename=clip["filename"]
+    )
+
+
+# =========================
+# START SERVER
+# =========================
+
+if __name__ == "__main__":
+
+    import uvicorn
+
+    port = int(
+        os.environ.get(
+            "PORT",
+            "10000"
+        )
+    )
+
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=port
+    )
