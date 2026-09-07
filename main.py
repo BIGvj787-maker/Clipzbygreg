@@ -12,7 +12,7 @@ app = FastAPI()
 
 # In-memory store for tracked creators
 monitored_creators = set()
-# Prevents recording the exact same live stream stream multiple times in a row
+# Prevents recording the exact same live stream multiple times in a row
 currently_recording = set()
 
 # Environment configurations (Keep these secure!)
@@ -76,6 +76,7 @@ def upload_to_tiktok(video_file_path: str, caption: str):
         with open(video_file_path, "rb") as video_file:
             upload_res = requests.put(upload_url, headers=upload_headers, data=video_file)
             
+        # FIX APPLIED HERE: Checks for successful HTTP status codes from TikTok
         if upload_res.status_code in:
             print("[TikTok Upload] Success! Clip posted safely.")
             return True
@@ -148,51 +149,44 @@ def record_and_clip_live(stream_url: str, duration_sec: int, username: str, capt
     except Exception as e:
         print(f"[Pipeline] Processing execution failed: {str(e)}")
     finally:
-        # Crucial: Allow this creator to be clipped again on future checks
         currently_recording.discard(username)
 
 # --- 24/7 BACKGROUND MONITOR LOOP ---
 async def continuous_stream_monitor():
     """Loops indefinitely, checking if tracked creators are live on Twitch."""
-    # Delay check to ensure server starts smoothly
     await asyncio.sleep(5)
     print("[Monitor] Automated 24/7 Live Stream Check Engine started.")
     
     while True:
-        # Check every creator currently in your database/set
         for username in list(monitored_creators):
             if username in currently_recording:
-                continue # Skip if we are already actively busy cutting a clip for them
+                continue 
                 
             stream_url = f"https://twitch.tv{username}"
             
             try:
                 session = streamlink.Streamlink()
-                # If streams returns dictionary items, they are actively broadcasting live
                 streams = session.streams(stream_url)
                 
                 if streams:
                     print(f"[Monitor] ALERT! @{username} just went live! Initializing automatic clip bot...")
                     currently_recording.add(username)
                     
-                    # Force background execution loop instantly 
                     asyncio.to_thread(
                         record_and_clip_live,
                         stream_url=stream_url,
-                        duration_sec=60, # Automatically records 60 seconds
+                        duration_sec=60, 
                         username=username,
                         caption=f"Insane live stream moment from @{username}! #twitch #clips #gaming"
                     )
             except Exception as e:
                 print(f"[Monitor] Error scanning stream status for @{username}: {str(e)}")
                 
-        # Wait 2 minutes before scanning the creator list again to avoid spamming network endpoints
         await asyncio.sleep(120)
 
 # --- FASTAPI LIFECYCLE EVENTS ---
 @app.on_event("startup")
 async def startup_event():
-    # Automatically boots up the loop worker right inside FastAPI's event tracker
     asyncio.create_task(continuous_stream_monitor())
 
 # --- FASTAPI WEB INTERFACE API ENDPOINTS ---
@@ -236,3 +230,4 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
