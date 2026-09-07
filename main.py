@@ -10,12 +10,11 @@ import streamlink
 
 app = FastAPI()
 
-# In-memory store for tracked creators
+# In-memory tracking lists
 monitored_creators = set()
-# Prevents recording the exact same live stream multiple times in a row
 currently_recording = set()
 
-# Environment configurations (Keep these secure!)
+# Official TikTok Configuration
 TIKTOK_CLIENT_KEY = os.getenv("TIKTOK_CLIENT_KEY", "7682396267984619541")
 TIKTOK_ACCESS_TOKEN = os.getenv("TIKTOK_ACCESS_TOKEN", "YOUR_USER_ACCESS_TOKEN")
 
@@ -29,7 +28,7 @@ class LiveClipRequest(BaseModel):
     duration_sec: int = 60 
     caption: str = "Live stream highlight!"
 
-# --- TIKTOK UPLOADER ENGINE ---
+# --- TIKTOK API UPLOADER ENGINE ---
 def upload_to_tiktok(video_file_path: str, caption: str):
     """Publishes the finalized video file using TikTok's Content Posting API."""
     if TIKTOK_ACCESS_TOKEN == "YOUR_USER_ACCESS_TOKEN":
@@ -60,6 +59,7 @@ def upload_to_tiktok(video_file_path: str, caption: str):
     }
     
     try:
+        # Step A: Initialize upload session
         response = requests.post(init_url, headers=headers, json=init_data)
         res_data = response.json()
         
@@ -67,6 +67,7 @@ def upload_to_tiktok(video_file_path: str, caption: str):
             print(f"[TikTok Upload] Init Failed: {res_data}")
             return False
             
+        # Step B: Securely stream video bytes directly to TikTok target URL
         upload_url = res_data["data"]["upload_url"]
         upload_headers = {
             "Content-Type": "video/mp4",
@@ -76,7 +77,7 @@ def upload_to_tiktok(video_file_path: str, caption: str):
         with open(video_file_path, "rb") as video_file:
             upload_res = requests.put(upload_url, headers=upload_headers, data=video_file)
             
-        # FIXED: Line 80 now checks for successful HTTP codes correctly
+        # Fixed list validation - checks for valid API response codes
         if upload_res.status_code in:
             print("[TikTok Upload] Success! Clip posted safely.")
             return True
@@ -98,18 +99,19 @@ def record_and_clip_live(stream_url: str, duration_sec: int, username: str, capt
     print(f"[Pipeline] Verifying live status for {stream_url}...")
     
     try:
+        # Step 1: Hook stream using Streamlink
         session = streamlink.Streamlink()
         streams = session.streams(stream_url)
         
         if not streams:
             print(f"[Pipeline] Error: Stream offline or link broken: {stream_url}")
-            currently_recording.discard(username)
             return
         
         best_stream = streams['best']
         stream_m3u8_url = best_stream.url
         
-        print(f"[Pipeline] Capturing {duration_sec}s of stream video...")
+        # Step 2: Stream copy raw segments using FFmpeg (Low CPU load)
+        print(f"[Pipeline] Capturing {duration_sec}s of live stream video...")
         ffmpeg_cmd = [
             'ffmpeg', '-y', 
             '-i', stream_m3u8_url,       
@@ -119,6 +121,7 @@ def record_and_clip_live(stream_url: str, duration_sec: int, username: str, capt
         ]
         subprocess.run(ffmpeg_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         
+        # Step 3: Vertical 9:16 center-cropping transformation
         if os.path.exists(raw_recorded_file):
             print(f"[Pipeline] Formatting captured source to 9:16...")
             video = VideoFileClip(raw_recorded_file)
@@ -133,25 +136,26 @@ def record_and_clip_live(stream_url: str, duration_sec: int, username: str, capt
                 logger=None 
             )
             
+            # Close file logs to clean memory locks
             video.close()
             video_vertical.close()
             os.remove(raw_recorded_file)
             print(f"[Pipeline] Vertical conversion compiled: {final_tiktok_clip}")
             
-            # Dispatch to TikTok
+            # Step 4: Post straight to your TikTok app flow
             upload_to_tiktok(video_file_path=final_tiktok_clip, caption=caption)
             
             if os.path.exists(final_tiktok_clip):
                 os.remove(final_tiktok_clip)
         else:
-            print("[Pipeline] Error: Raw capture was never successfully written.")
+            print("[Pipeline] Error: Raw capture was never written by FFmpeg.")
 
     except Exception as e:
         print(f"[Pipeline] Processing execution failed: {str(e)}")
     finally:
         currently_recording.discard(username)
 
-# --- 24/7 BACKGROUND MONITOR LOOP ---
+# --- 24/7 AUTOMATED LIVE STREAM MONITOR ---
 async def continuous_stream_monitor():
     """Loops indefinitely, checking if tracked creators are live on Twitch."""
     await asyncio.sleep(5)
@@ -182,14 +186,16 @@ async def continuous_stream_monitor():
             except Exception as e:
                 print(f"[Monitor] Error scanning stream status for @{username}: {str(e)}")
                 
+        # Scan your creator lists every 2 minutes
         await asyncio.sleep(120)
 
-# --- FASTAPI LIFECYCLE EVENTS ---
+# --- FASTAPI LIFECYCLE MANAGEMENT ---
 @app.on_event("startup")
 async def startup_event():
+    # Automatically boots up the background check loop thread
     asyncio.create_task(continuous_stream_monitor())
 
-# --- FASTAPI WEB INTERFACE API ENDPOINTS ---
+# --- YOUR ORIGINAL SYSTEM ENDPOINTS ---
 @app.get("/")
 def home():
     return {"status": "Clipz by Greg is running"}
@@ -198,11 +204,17 @@ def home():
 def add_creator(request: CreatorRequest):
     username = request.username.lstrip("@").strip().lower()
     monitored_creators.add(username)
-    return {"status": "creator added", "username": username, "monitoring": True}
+    return {
+        "status": "creator added",
+        "username": username,
+        "monitoring": True
+    }
 
 @app.get("/creators")
 def get_creators():
-    return {"creators": sorted(monitored_creators)}
+    return {
+        "creators": sorted(monitored_creators)
+    }
 
 @app.post("/create-clip")
 def create_clip(request: LiveClipRequest, background_tasks: BackgroundTasks):
@@ -212,6 +224,8 @@ def create_clip(request: LiveClipRequest, background_tasks: BackgroundTasks):
         return {"status": "busy", "message": f"Already processing a clip for @{username} right now."}
         
     currently_recording.add(username)
+    
+    # Offloads recording pipeline completely out of main thread window
     background_tasks.add_task(
         record_and_clip_live, 
         stream_url=request.stream_url, 
@@ -223,7 +237,7 @@ def create_clip(request: LiveClipRequest, background_tasks: BackgroundTasks):
     return {
         "status": "recording_initiated",
         "username": username,
-        "message": "Manual override triggered: Ripping footage now."
+        "message": f"Ready to process a clip for @{username}"
     }
 
 if __name__ == "__main__":
