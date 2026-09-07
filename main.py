@@ -1,19 +1,14 @@
 import os
 import uuid
-from pathlib import Path
-
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from datetime import datetime, timezone
+from fastapi import FastAPI
 from pydantic import BaseModel
 
-app = FastAPI(title="Clipz by Greg")
-
-# Local storage for uploaded recordings.
-# This is a starter setup; persistent cloud storage can be added next.
-UPLOAD_DIR = Path("recordings")
-UPLOAD_DIR.mkdir(exist_ok=True)
+app = FastAPI()
 
 monitored_creators = set()
 recordings = {}
+recording_sessions = {}
 
 
 class CreatorRequest(BaseModel):
@@ -24,21 +19,18 @@ class ClipRequest(BaseModel):
     username: str
 
 
+class RecordingRequest(BaseModel):
+    username: str
+
+
 @app.get("/")
 def home():
-    return {
-        "status": "Clipz by Greg is running",
-        "creators": len(monitored_creators),
-        "recordings": len(recordings)
-    }
+    return {"status": "Clipz by Greg is running"}
 
 
 @app.post("/add-creator")
 def add_creator(request: CreatorRequest):
     username = request.username.lstrip("@").strip()
-
-    if not username:
-        raise HTTPException(status_code=400, detail="Username is required")
 
     monitored_creators.add(username)
 
@@ -56,47 +48,81 @@ def get_creators():
     }
 
 
-@app.post("/upload-recording")
-async def upload_recording(
-    username: str = Form(...),
-    file: UploadFile = File(...)
-):
-    username = username.lstrip("@").strip()
-
-    if not username:
-        raise HTTPException(status_code=400, detail="Username is required")
+@app.post("/start-recording")
+def start_recording(request: RecordingRequest):
+    username = request.username.lstrip("@").strip()
 
     if username not in monitored_creators:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Creator @{username} is not being monitored"
-        )
+        return {
+            "status": "error",
+            "message": f"@{username} is not in the creator list"
+        }
 
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="File is required")
+    if username in recording_sessions:
+        return {
+            "status": "already recording",
+            "username": username,
+            "recording_id": recording_sessions[username]["recording_id"]
+        }
 
     recording_id = str(uuid.uuid4())
-    extension = Path(file.filename).suffix or ".mp4"
-    filename = f"{username}_{recording_id}{extension}"
-    file_path = UPLOAD_DIR / filename
 
-    with file_path.open("wb") as output:
-        while chunk := await file.read(1024 * 1024):
-            output.write(chunk)
-
-    recordings[recording_id] = {
-        "id": recording_id,
+    recording_sessions[username] = {
+        "recording_id": recording_id,
         "username": username,
-        "filename": filename,
-        "path": str(file_path),
-        "status": "uploaded"
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "status": "recording"
     }
 
     return {
-        "status": "recording uploaded",
-        "recording_id": recording_id,
+        "status": "recording started",
         "username": username,
-        "filename": filename
+        "recording_id": recording_id,
+        "started_at": recording_sessions[username]["started_at"]
+    }
+
+
+@app.post("/stop-recording")
+def stop_recording(request: RecordingRequest):
+    username = request.username.lstrip("@").strip()
+
+    session = recording_sessions.get(username)
+
+    if not session:
+        return {
+            "status": "error",
+            "message": f"No active recording for @{username}"
+        }
+
+    session["status"] = "stopped"
+    session["stopped_at"] = datetime.now(timezone.utc).isoformat()
+
+    recording_id = session["recording_id"]
+
+    recordings[recording_id] = session
+    del recording_sessions[username]
+
+    return {
+        "status": "recording stopped",
+        "username": username,
+        "recording_id": recording_id,
+        "started_at": session["started_at"],
+        "stopped_at": session["stopped_at"]
+    }
+
+
+@app.get("/recording-status/{username}")
+def recording_status(username: str):
+    username = username.lstrip("@").strip()
+
+    session = recording_sessions.get(username)
+
+    if session:
+        return session
+
+    return {
+        "username": username,
+        "status": "not recording"
     }
 
 
@@ -111,30 +137,22 @@ def get_recordings():
 def create_clip(request: ClipRequest):
     username = request.username.lstrip("@").strip()
 
-    matching_recordings = [
-        recording
-        for recording in recordings.values()
-        if recording["username"] == username
+    creator_recordings = [
+        r for r in recordings.values()
+        if r["username"] == username
     ]
-
-    if not matching_recordings:
-        return {
-            "status": "no recording found",
-            "username": username,
-            "message": f"No recording is available for @{username} yet."
-        }
 
     return {
         "status": "clip request received",
         "username": username,
-        "recordings_available": len(matching_recordings),
+        "recordings_available": len(creator_recordings),
         "message": f"Ready to analyze recordings for @{username}"
     }
 
 
 @app.get("/health")
 def health():
-    return {"status": "healthy"}
+    return {"status": "ok"}
 
 
 if __name__ == "__main__":
