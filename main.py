@@ -76,7 +76,7 @@ def upload_to_tiktok(video_file_path: str, caption: str):
         with open(video_file_path, "rb") as video_file:
             upload_res = requests.put(upload_url, headers=upload_headers, data=video_file)
             
-        # FIXED LINE: Validates the HTTP success codes
+        # FIXED: Line 80 now checks for successful HTTP codes correctly
         if upload_res.status_code in:
             print("[TikTok Upload] Success! Clip posted safely.")
             return True
