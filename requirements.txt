@@ -1,11 +1,4 @@
-python-dotenv
 fastapi
 uvicorn
-httpx
-sqlalchemy
-openai
-python-telegram-bot
-google-api-python-client
-google-auth
-google-auth-httplib2
-google-auth-oauthlib
+pydantic
+python-multipart
