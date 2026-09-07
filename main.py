@@ -1,18 +1,27 @@
 import os
 from fastapi import FastAPI
+from pydantic import BaseModel
 
 app = FastAPI()
+
+
+class ClipRequest(BaseModel):
+    username: str
+
 
 @app.get("/")
 def home():
     return {"status": "Clipz by Greg is running"}
 
-@app.post("/clip")
-def create_clip():
+
+@app.post("/create-clip")
+def create_clip(request: ClipRequest):
     return {
         "status": "clip request received",
-        "message": "Clipz by Greg is ready to process a clip"
+        "username": request.username,
+        "message": f"Ready to process a clip for @{request.username}"
     }
+
 
 if __name__ == "__main__":
     import uvicorn
