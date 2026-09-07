@@ -6,7 +6,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel
 
@@ -28,8 +28,12 @@ for folder in (RECORDINGS_DIR, CLIPS_DIR, TEMP_DIR):
 creators = {}
 recordings = {}
 clips = {}
+
 live_processes = {}
 live_sessions = {}
+
+test_processes = {}
+test_sessions = {}
 
 
 # =========================
@@ -49,11 +53,6 @@ class ClipRequest(BaseModel):
     recording_id: str
     start_time: float = 0
     duration: float = 30
-
-
-class AIClipRequest(BaseModel):
-    recording_id: str
-    moment_rank: int = 1
 
 
 class TwoClipRequest(BaseModel):
@@ -215,8 +214,8 @@ def home():
             </h1>
 
             <p>
-                Record authorized live feeds, find the best moments,
-                and create short-form clips.
+                Record authorized live feeds, test the recording pipeline,
+                find the best moments, and create short-form clips.
             </p>
 
         </section>
@@ -226,7 +225,7 @@ def home():
             <div class="card">
                 <h2>Any Creator</h2>
                 <p>
-                    Add and manage any creator by username.
+                    Add and manage creators by username.
                 </p>
             </div>
 
@@ -234,6 +233,13 @@ def home():
                 <h2>LIVE Recording</h2>
                 <p>
                     Record an authorized live feed with FFmpeg.
+                </p>
+            </div>
+
+            <div class="card">
+                <h2>Test Recording</h2>
+                <p>
+                    Test the complete recording pipeline.
                 </p>
             </div>
 
@@ -429,13 +435,8 @@ def finalize_live(username, recording_id):
     if not session:
         return
 
-    temp_path = Path(
-        session["temp_path"]
-    )
-
-    final_path = Path(
-        session["final_path"]
-    )
+    temp_path = Path(session["temp_path"])
+    final_path = Path(session["final_path"])
 
     if not temp_path.exists():
         live_processes.pop(username, None)
@@ -552,6 +553,245 @@ def stop_live(request: CreatorRequest):
 
 
 # =========================
+# CONTINUOUS TEST RECORDER
+# =========================
+
+@app.post("/start-test-recording")
+def start_test_recording(request: CreatorRequest):
+
+    username = clean_username(request.username)
+
+    if username not in creators:
+        raise HTTPException(
+            status_code=404,
+            detail="Creator is not being monitored"
+        )
+
+    if username in test_processes:
+        raise HTTPException(
+            status_code=409,
+            detail="Test recording is already running"
+        )
+
+    recording_id = str(uuid.uuid4())
+
+    temp_path = TEMP_DIR / (
+        f"{username}_test_{recording_id}.mkv"
+    )
+
+    final_path = RECORDINGS_DIR / (
+        f"{username}_test_{recording_id}.mp4"
+    )
+
+    # Synthetic test source:
+    # 1280x720 video + generated audio.
+    # This is only for testing the Clipz pipeline.
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel", "warning",
+        "-y",
+
+        "-f", "lavfi",
+        "-re",
+        "-i",
+        "testsrc2=size=1280x720:rate=30",
+
+        "-f", "lavfi",
+        "-re",
+        "-i",
+        "sine=frequency=440:sample_rate=48000",
+
+        "-map", "0:v",
+        "-map", "1:a",
+
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-pix_fmt", "yuv420p",
+
+        "-c:a", "aac",
+        "-b:a", "128k",
+
+        "-f", "matroska",
+
+        str(temp_path)
+    ]
+
+    try:
+
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+
+    except FileNotFoundError:
+
+        raise HTTPException(
+            status_code=500,
+            detail="FFmpeg is unavailable"
+        )
+
+    test_processes[username] = process
+
+    test_sessions[username] = {
+        "recording_id": recording_id,
+        "username": username,
+        "started_at": now(),
+        "temp_path": str(temp_path),
+        "final_path": str(final_path)
+    }
+
+    threading.Thread(
+        target=watch_test_recording,
+        args=(username, recording_id, process),
+        daemon=True
+    ).start()
+
+    return {
+        "status": "test recording started",
+        "recording_id": recording_id,
+        "username": username,
+        "started_at": test_sessions[username]["started_at"]
+    }
+
+
+def watch_test_recording(username, recording_id, process):
+
+    process.wait()
+
+    finalize_test_recording(
+        username,
+        recording_id
+    )
+
+
+def finalize_test_recording(username, recording_id):
+
+    session = test_sessions.get(username)
+
+    if not session:
+        return
+
+    temp_path = Path(session["temp_path"])
+    final_path = Path(session["final_path"])
+
+    if not temp_path.exists():
+        test_processes.pop(username, None)
+        test_sessions.pop(username, None)
+        return
+
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(temp_path),
+            "-c", "copy",
+            "-movflags", "+faststart",
+            str(final_path)
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+
+    if result.returncode != 0:
+        final_path = temp_path
+
+    duration = get_duration(final_path)
+
+    size = final_path.stat().st_size if final_path.exists() else 0
+
+    recordings[recording_id] = {
+        "recording_id": recording_id,
+        "username": username,
+        "started_at": session["started_at"],
+        "stopped_at": now(),
+        "filename": final_path.name,
+        "file_path": str(final_path),
+        "file_size": size,
+        "duration": duration,
+        "status": "completed",
+        "source": "test_stream"
+    }
+
+    if temp_path.exists() and temp_path != final_path:
+
+        try:
+            temp_path.unlink()
+        except Exception:
+            pass
+
+    test_processes.pop(username, None)
+    test_sessions.pop(username, None)
+
+
+@app.get("/test-recording-status/{username}")
+def test_recording_status(username: str):
+
+    username = clean_username(username)
+
+    if username not in test_processes:
+
+        return {
+            "username": username,
+            "recording": False,
+            "status": "not_recording"
+        }
+
+    process = test_processes[username]
+    session = test_sessions[username]
+
+    return {
+        "username": username,
+        "recording": True,
+        "status": "recording",
+        "recording_id": session["recording_id"],
+        "started_at": session["started_at"],
+        "process_running": process.poll() is None
+    }
+
+
+@app.post("/stop-test-recording")
+def stop_test_recording(request: CreatorRequest):
+
+    username = clean_username(request.username)
+
+    if username not in test_processes:
+
+        raise HTTPException(
+            status_code=404,
+            detail="No test recording found"
+        )
+
+    process = test_processes[username]
+
+    recording_id = test_sessions[username]["recording_id"]
+
+    process.terminate()
+
+    try:
+
+        process.wait(timeout=15)
+
+    except subprocess.TimeoutExpired:
+
+        process.kill()
+        process.wait()
+
+    finalize_test_recording(
+        username,
+        recording_id
+    )
+
+    return {
+        "status": "test recording stopped",
+        "recording": recordings.get(recording_id)
+    }
+
+
+# =========================
 # RECORDINGS
 # =========================
 
@@ -606,11 +846,13 @@ def analyze_audio(file_path):
             if "mean_volume" in line:
 
                 try:
+
                     volume = float(
                         line.split(":")[-1]
                         .strip()
                         .replace(" dB", "")
                     )
+
                 except Exception:
                     pass
 
@@ -697,7 +939,6 @@ def create_clip(request: ClipRequest):
     )
 
     if not recording:
-
         raise HTTPException(
             status_code=404,
             detail="Recording not found"
@@ -708,7 +949,6 @@ def create_clip(request: ClipRequest):
     )
 
     if not input_path.exists():
-
         raise HTTPException(
             status_code=404,
             detail="Recording file not found"
@@ -718,9 +958,7 @@ def create_clip(request: ClipRequest):
 
     username = recording["username"]
 
-    filename = (
-        f"{username}_{clip_id}.mp4"
-    )
+    filename = f"{username}_{clip_id}.mp4"
 
     output_path = CLIPS_DIR / filename
 
@@ -855,9 +1093,7 @@ def create_two_clips(request: TwoClipRequest):
 
     full_id = str(uuid.uuid4())
 
-    full_filename = (
-        f"{username}_{full_id}.mp4"
-    )
+    full_filename = f"{username}_{full_id}.mp4"
 
     full_path = CLIPS_DIR / full_filename
 
@@ -900,9 +1136,7 @@ def create_two_clips(request: TwoClipRequest):
 
     vertical_id = str(uuid.uuid4())
 
-    vertical_filename = (
-        f"{username}_{vertical_id}.mp4"
-    )
+    vertical_filename = f"{username}_{vertical_id}.mp4"
 
     vertical_path = CLIPS_DIR / vertical_filename
 
